@@ -38,6 +38,7 @@ type CreateOptions struct {
 	VmDriver               string
 	Provider               string
 	KubeconfigOutput       string
+	Proxy                  string
 }
 
 var co = &CreateOptions{}
@@ -69,7 +70,7 @@ func RunCreate(co *CreateOptions) error {
 		return err
 	}
 
-	mini := minikube.New(co.VmDriver)
+	mini := minikube.New(co.VmDriver, co.Proxy)
 	pd, err := getProvider(co.Provider)
 	if err != nil {
 		return err
@@ -101,6 +102,8 @@ func init() {
 	createClusterCmd.Flags().BoolVarP(&co.CleanupExternalCluster, "cleanup-external-cluster", "", true, "Whether to cleanup the external cluster after bootstrap")
 	createClusterCmd.Flags().StringVarP(&co.VmDriver, "vm-driver", "", "", "Which vm driver to use for minikube")
 	createClusterCmd.Flags().StringVarP(&co.KubeconfigOutput, "kubeconfig-out", "", "kubeconfig", "where to output the kubeconfig for the provisioned cluster.")
+	// Yucky proxy
+	createClusterCmd.Flags().StringVarP(&co.Proxy, "proxy", "", "", "proxy to use WITH the protocol.")
 
 	createCmd.AddCommand(createClusterCmd)
 }
