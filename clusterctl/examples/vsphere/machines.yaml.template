@@ -14,16 +14,53 @@ items:
         machineVariables:
           datacenter: ""
           datastore: ""
+          cluster: ""
           resource_pool: ""
-          network: ""
+          network: "VM Network"
           num_cpus: "2"
           memory: "2048"
-          vm_template: ""
-          disk_label: ""
-          disk_size: ""
-          virtual_machine_domain: ""
+          vm_template: "ubuntu-xenial-16.04-cloudimg-20180615"
+          disk_label: "disk0"
+          disk_size: "10"
+          proxy: ""
+          ipv4_address: ""
+          ipv4_netmask_prefix_length: ""
+          ipv4_gateway: ""
+          dns_nameservers: "8.8.8.8 8.8.4.4"
     versions:
       kubelet: 1.10.1
       controlPlane: 1.10.1
     roles:
     - Master
+- apiVersion: "cluster.k8s.io/v1alpha1"
+  kind: Machine
+  metadata:
+    generateName: vs-node-
+    labels:
+      set: node
+  spec:
+    providerConfig:
+      value:
+        apiVersion: "vsphereproviderconfig/v1alpha1"
+        kind: "VsphereMachineProviderConfig"
+        vsphereMachine: "standard-node"
+        machineVariables:
+          datacenter: ""
+          datastore: ""
+          cluster: ""
+          resource_pool: ""
+          network: "VM Network"
+          num_cpus: "2"
+          memory: "2048"
+          vm_template: "ubuntu-xenial-16.04-cloudimg-20180615"
+          disk_label: "disk0"
+          disk_size: "10"
+          proxy: ""
+          ipv4_address: ""
+          ipv4_netmask_prefix_length: ""
+          ipv4_gateway: ""
+          dns_nameservers: "8.8.8.8 8.8.4.4"
+    versions:
+      kubelet: 1.10.1
+    roles:
+    - Node

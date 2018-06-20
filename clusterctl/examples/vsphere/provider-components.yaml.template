@@ -61,11 +61,6 @@ spec:
             subPath: vsphere_tmp.pub
           - name: named-machines
             mountPath: /etc/named-machines
-        env:
-          - name: NODE_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: spec.nodeName
         command:
         - "./vsphere-machine-controller"
         args:
@@ -126,10 +121,16 @@ data:
         variable "num_cpus" {}
         variable "memory" {}
         variable "vm_template" {}
+        variable "proxy" { default = "" }
         variable "network" { default = "VM Network"}
         variable "disk_label" { default = "disk0" }
         variable "disk_size" { default = 10}
-        variable "startup_script_path" {}
+
+        variable "cluster" { default =  "" }
+        variable "ipv4_address" { default = "" }
+        variable "ipv4_netmask_prefix_length" { default = "" }
+        variable "ipv4_gateway" { default = "" }
+        variable "dns_nameservers" { default = "" }
 
         variable "vm_name" {
           type = "string"
@@ -158,6 +159,11 @@ data:
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
         }
 
+        data "vsphere_compute_cluster" "cluster" {
+          name          = "${var.cluster}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
         data "vsphere_resource_pool" "pool" {
           name          = "${var.resource_pool}"
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
@@ -168,7 +174,7 @@ data:
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
         }
 
-        data "vsphere_virtual_machine" "template" {
+        data "vsphere_virtual_machine" "template_from_ovf" {
           name          = "${var.vm_template}"
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
         }
@@ -207,26 +213,121 @@ data:
           }
         }
 
+        # Set HTTP_PROXY and related environment variables.
+        # TODO: Make serviceDomain, podCidr and serviceCidr variables
+        # in this template.
+        data "template_file" "proxy_env" {
+          template = <<EOF
+        PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        http_proxy="http://$${proxy}"
+        https_proxy="http://$${proxy}"
+        ftp_proxy="http://$${proxy}"
+        no_proxy="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address},$${address}/$${prefixLen}"
+        HTTP_PROXY="http://$${proxy}"
+        HTTPS_PROXY="http://$${proxy}"
+        FTP_PROXY="http://$${proxy}"
+        NO_PROXY="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address},$${address}/$${prefixLen}"
+        EOF
+          vars {
+            proxy = "${var.proxy}"
+            address = "${var.ipv4_address}"
+            prefixLen = "${var.ipv4_netmask_prefix_length}"
+          }
+        }
+
+        data "template_file" "static_ip_data" {
+          template = <<EOF
+        auto lo
+        iface lo inet loopback
+
+        auto ens192
+        iface ens192 inet static
+            address $${address}
+            netmask $${netmask}
+            gateway $${gateway}
+            dns-nameservers $${dns_nameservers}
+        EOF
+          vars {
+              address = "${var.ipv4_address}"
+              netmask = "${cidrnetmask("${var.ipv4_address}/${var.ipv4_netmask_prefix_length}")}"
+              gateway = "${var.ipv4_gateway}"
+              dns_nameservers = "${var.dns_nameservers}"
+            }
+        }
+
         data "template_file" "user_data" {
           template = <<EOF
         #cloud-config
         write_files:
-          - path: /tmp/master.sh
+          # systemd service for kubernetes-installation primarily to get environment file support.
+          - path: /etc/systemd/system/kubernetes-installation.service
+            permissions: 0644
+            content: |
+              [Unit]
+              Description=Download and install kubernetes binaries and configurations.
+              After=network-online.target
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              EnvironmentFile=/etc/environment
+              ExecStart=/etc/kubernetes/installation/install.sh
+          # Startup script for this machine.
+          - path: /etc/kubernetes/installation/install.sh
             permissions: '0755'
             encoding: base64
             content: |
               $${startup_script}
+          # kubernetes vsphere cloud provider config.
           - path: /etc/kubernetes/cloud-config/cloud-config.yaml
             permissions: '0600'
             encoding: base64
             content: |
               $${cloud_provider_config}
+          # environment variables
+          - path: /etc/environment
+            permissions: '0644'
+            encoding: base64
+            content: |
+              $${proxy_env}
+          # Docker has it's own env var file.
+          - path: /etc/default/docker
+            permissions: '0644'
+            encoding: base64
+            content: |
+              $${proxy_env}
+          # Option to use an existing apt config file instead of prompting of it.
+          - path: /etc/apt/apt.conf.d/71debconf
+            permissions: '0644'
+            content: |
+              Dpkg::Options {
+                "--force-confdef";
+              };
+          # proxy config for apt.
+          - path: /etc/apt/apt.conf.d/95proxies
+            permissions: '0644'
+            content: |
+              Acquire::http::Proxy "http://$${proxy}";
+              Acquire::https::Proxy "https://$${proxy}";
+              Acquire::ftp::Proxy "ftp://$${proxy}";
+          # Static IP interface
+          - path: /etc/network/interfaces.d/99-syllogi.cfg
+            permissions: '0644'
+            encoding: base64
+            content: |
+              $${static_ip_data}
         runcmd:
-          - /tmp/master.sh
+          - sudo ip addr flush ens192
+          - sudo ifdown ens192 && ifup ens192
+          - systemctl daemon-reload
+          - systemctl enable kubernetes-installation.service
+          - systemctl start kubernetes-installation.service
         EOF
           vars {
-            startup_script = "${base64encode(file(var.startup_script_path))}"
+            startup_script = "${base64encode(file("/tmp/machine-startup.sh"))}"
             cloud_provider_config = "${base64encode(data.template_file.cloud_provider_config.rendered)}"
+            proxy_env = "${base64encode(data.template_file.proxy_env.rendered)}"
+            proxy = "${var.proxy}"
+            static_ip_data = "${base64encode(data.template_file.static_ip_data.rendered)}"
           }
         }
 
@@ -237,25 +338,27 @@ data:
 
           num_cpus         = "${var.num_cpus}"
           memory           = "${var.memory}"
-          guest_id         = "${data.vsphere_virtual_machine.template.guest_id}"
+          guest_id         = "${data.vsphere_virtual_machine.template_from_ovf.guest_id}"
           enable_disk_uuid = "true"
 
-          scsi_type = "${data.vsphere_virtual_machine.template.scsi_type}"
+          wait_for_guest_net_timeout = 15
+
+          scsi_type = "${data.vsphere_virtual_machine.template_from_ovf.scsi_type}"
 
           network_interface {
             network_id   = "${data.vsphere_network.network.id}"
-            adapter_type = "${data.vsphere_virtual_machine.template.network_interface_types[0]}"
+            adapter_type = "${data.vsphere_virtual_machine.template_from_ovf.network_interface_types[0]}"
           }
 
           disk {
             label            = "${var.disk_label}"
-            size             = "${max(var.disk_size, data.vsphere_virtual_machine.template.disks.0.size)}"
-            eagerly_scrub    = "${data.vsphere_virtual_machine.template.disks.0.eagerly_scrub}"
-            thin_provisioned = "${data.vsphere_virtual_machine.template.disks.0.thin_provisioned}"
+            size             = "${max(var.disk_size, data.vsphere_virtual_machine.template_from_ovf.disks.0.size)}"
+            eagerly_scrub    = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.eagerly_scrub}"
+            thin_provisioned = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.thin_provisioned}"
           }
 
           clone {
-            template_uuid = "${data.vsphere_virtual_machine.template.id}"
+            template_uuid = "${data.vsphere_virtual_machine.template_from_ovf.id}"
           }
 
           cdrom {
@@ -286,10 +389,16 @@ data:
         variable "num_cpus" {}
         variable "memory" {}
         variable "vm_template" {}
+        variable "proxy" { default = "" }
         variable "network" { default = "VM Network"}
         variable "disk_label" { default = "disk0" }
         variable "disk_size" { default = 10}
-        variable "startup_script_path" {}
+
+        variable "cluster" { default =  "" }
+        variable "ipv4_address" { default = "" }
+        variable "ipv4_netmask_prefix_length" { default = "" }
+        variable "ipv4_gateway" { default = "" }
+        variable "dns_nameservers" { default = "" }
 
         variable "vm_name" {
           type = "string"
@@ -318,6 +427,11 @@ data:
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
         }
 
+        data "vsphere_compute_cluster" "cluster" {
+          name          = "${var.cluster}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
         data "vsphere_resource_pool" "pool" {
           name          = "${var.resource_pool}"
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
@@ -328,9 +442,51 @@ data:
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
         }
 
-        data "vsphere_virtual_machine" "template" {
+        data "vsphere_virtual_machine" "template_from_ovf" {
           name          = "${var.vm_template}"
           datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        # Set HTTP_PROXY and related environment variables.
+        # TODO: Make serviceDomain, podCidr and serviceCidr variables
+        # in this template.
+        data "template_file" "proxy_env" {
+          template = <<EOF
+        PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        http_proxy="http://$${proxy}"
+        https_proxy="http://$${proxy}"
+        ftp_proxy="http://$${proxy}"
+        no_proxy="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address},$${address}/$${prefixLen}"
+        HTTP_PROXY="http://$${proxy}"
+        HTTPS_PROXY="http://$${proxy}"
+        FTP_PROXY="http://$${proxy}"
+        NO_PROXY="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address},$${address}/$${prefixLen}"
+        EOF
+          vars {
+            proxy = "${var.proxy}"
+            address = "${var.ipv4_address}"
+            prefixLen = "${var.ipv4_netmask_prefix_length}"
+          }
+        }
+
+        data "template_file" "static_ip_data" {
+          template = <<EOF
+        auto lo
+        iface lo inet loopback
+
+        auto ens192
+        iface ens192 inet static
+            address $${address}
+            netmask $${netmask}
+            gateway $${gateway}
+            dns-nameservers $${dns_nameservers}
+        EOF
+          vars {
+              address = "${var.ipv4_address}"
+              netmask = "${cidrnetmask("${var.ipv4_address}/${var.ipv4_netmask_prefix_length}")}"
+              gateway = "${var.ipv4_gateway}"
+              dns_nameservers = "${var.dns_nameservers}"
+            }
         }
 
         // Generate cloud-config for VM startup
@@ -338,15 +494,68 @@ data:
           template = <<EOF
         #cloud-config
         write_files:
-          - content: |
-              $${startup_script}
-            path: /tmp/node.sh
+          # systemd service for kubernetes-installation primarily to get environment file support.
+          - path: /etc/systemd/system/kubernetes-installation.service
+            permissions: 0644
+            content: |
+              [Unit]
+              Description=Download and install kubernetes binaries and configurations.
+              After=network-online.target
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              EnvironmentFile=/etc/environment
+              ExecStart=/etc/kubernetes/installation/install.sh
+          # Startup script for this machine.
+          - path: /etc/kubernetes/installation/install.sh
             permissions: '0755'
+            encoding: base64
+            content: |
+              $${startup_script}
+          # environment variables
+          - path: /etc/environment
+            permissions: '0644'
+            encoding: base64
+            content: |
+              $${proxy_env}
+          # Docker has it's own env var file.
+          - path: /etc/default/docker
+            permissions: '0644'
+            encoding: base64
+            content: |
+              $${proxy_env}
+          # Option to use an existing apt config file instead of prompting of it.
+          - path: /etc/apt/apt.conf.d/71debconf
+            permissions: '0644'
+            content: |
+              Dpkg::Options {
+                "--force-confdef";
+              };
+          # proxy config for apt.
+          - path: /etc/apt/apt.conf.d/95proxies
+            permissions: '0644'
+            content: |
+              Acquire::http::Proxy "http://$${proxy}";
+              Acquire::https::Proxy "https://$${proxy}";
+              Acquire::ftp::Proxy "ftp://$${proxy}";
+          # Static IP interface
+          - path: /etc/network/interfaces.d/99-syllogi.cfg
+            permissions: '0644'
+            encoding: base64
+            content: |
+              $${static_ip_data}
         runcmd:
-          - /tmp/node.sh
+          - sudo ip addr flush ens192
+          - sudo ifdown ens192 && ifup ens192
+          - systemctl daemon-reload
+          - systemctl enable kubernetes-installation.service
+          - systemctl start kubernetes-installation.service
         EOF
           vars {
-            startup_script = "${base64encode(file(var.startup_script_path))}"
+            startup_script = "${base64encode(file("/tmp/machine-startup.sh"))}"
+            proxy_env = "${base64encode(data.template_file.proxy_env.rendered)}"
+            proxy = "${var.proxy}"
+            static_ip_data = "${base64encode(data.template_file.static_ip_data.rendered)}"
           }
         }
 
@@ -357,25 +566,27 @@ data:
 
           num_cpus         = "${var.num_cpus}"
           memory           = "${var.memory}"
-          guest_id         = "${data.vsphere_virtual_machine.template.guest_id}"
+          guest_id         = "${data.vsphere_virtual_machine.template_from_ovf.guest_id}"
           enable_disk_uuid = "true"
 
-          scsi_type = "${data.vsphere_virtual_machine.template.scsi_type}"
+          wait_for_guest_net_timeout = 15
+
+          scsi_type = "${data.vsphere_virtual_machine.template_from_ovf.scsi_type}"
 
           network_interface {
             network_id   = "${data.vsphere_network.network.id}"
-            adapter_type = "${data.vsphere_virtual_machine.template.network_interface_types[0]}"
+            adapter_type = "${data.vsphere_virtual_machine.template_from_ovf.network_interface_types[0]}"
           }
 
           disk {
             label            = "${var.disk_label}"
-            size             = "${max(var.disk_size, data.vsphere_virtual_machine.template.disks.0.size)}"
-            eagerly_scrub    = "${data.vsphere_virtual_machine.template.disks.0.eagerly_scrub}"
-            thin_provisioned = "${data.vsphere_virtual_machine.template.disks.0.thin_provisioned}"
+            size             = "${max(var.disk_size, data.vsphere_virtual_machine.template_from_ovf.disks.0.size)}"
+            eagerly_scrub    = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.eagerly_scrub}"
+            thin_provisioned = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.thin_provisioned}"
           }
 
           clone {
-            template_uuid = "${data.vsphere_virtual_machine.template.id}"
+            template_uuid = "${data.vsphere_virtual_machine.template_from_ovf.id}"
           }
 
           cdrom {
