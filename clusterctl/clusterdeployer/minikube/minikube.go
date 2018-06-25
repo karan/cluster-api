@@ -62,6 +62,13 @@ func (m *Minikube) Create() error {
 		args = append(args, fmt.Sprintf("no_proxy=%s,192.168.0.0/16", proxyUrl.Hostname()))
 	}
 	_, err := m.exec(args...)
+	if err != nil {
+		return err
+	}
+
+	args = []string{"update-context"}
+	_, err = m.exec(args...)
+
 	return err
 }
 
