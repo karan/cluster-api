@@ -61,7 +61,13 @@ func (m *Minikube) Create() error {
 		args = append(args, "--docker-env")
 		args = append(args, fmt.Sprintf("no_proxy=%s,192.168.0.0/16", proxyUrl.Hostname()))
 	}
+
 	_, err := m.exec(args...)
+
+	args = []string{"update-context"}
+	// Discard this error
+	_, _ = m.exec(args...)
+
 	return err
 }
 
