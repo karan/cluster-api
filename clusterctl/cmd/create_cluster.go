@@ -119,8 +119,8 @@ func init() {
 	createClusterCmd.Flags().StringVarP(&co.VmDriver, "vm-driver", "", "", "Which vm driver to use for minikube")
 	createClusterCmd.Flags().StringVarP(&co.KubeconfigOutput, "kubeconfig-out", "", "kubeconfig", "Where to output the kubeconfig for the provisioned cluster")
 	// Yucky proxy
-	createClusterCmd.Flags().StringVarP(&co.Proxy, "proxy", "", "", "proxy to use WITH the protocol.")
-	createClusterCmd.Flags().StringVarP(&co.NoProxy, "no-proxy", "", "", "no_proxy env vars.")
+	createClusterCmd.Flags().StringVarP(&co.Proxy, "proxy", "", "", "HTTP proxy to use with \"http://\".")
+	createClusterCmd.Flags().StringVarP(&co.NoProxy, "no-proxy", "", "", "Comma-separated list of  URLs that should be excluded from proxying.")
 
 	createCmd.AddCommand(createClusterCmd)
 }

@@ -117,7 +117,7 @@ metadata:
 data:
   vsphere_named_machines.yaml: |-
     items:
-    - machineName: standard-master
+    - machineName: standard-master-proxy
       machineHcl: |
         variable "vsphere_user" {}
         variable "vsphere_password" {}
@@ -226,20 +226,21 @@ data:
         # Set HTTP_PROXY and related environment variables.
         # TODO: Make serviceDomain, podCidr and serviceCidr variables
         # in this template.
+        # Some things in ubuntu need the lower case, and some upper case.
         data "template_file" "proxy_env" {
           template = <<EOF
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         http_proxy="http://$${proxy}"
-        https_proxy="http://$${proxy}"
+        https_proxy="https://$${proxy}"
         ftp_proxy="http://$${proxy}"
         no_proxy="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address}"
         HTTP_PROXY="http://$${proxy}"
-        HTTPS_PROXY="http://$${proxy}"
+        HTTPS_PROXY="https://$${proxy}"
         FTP_PROXY="http://$${proxy}"
         NO_PROXY="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address}"
         EOF
           vars {
-            proxy = "${var.proxy}"
+            proxy = "${replace(var.proxy, "http", "")}"
             address = "${var.ipv4_address}"
           }
         }
@@ -335,7 +336,7 @@ data:
             startup_script = "${base64encode(file(var.startup_script_path))}"
             cloud_provider_config = "${base64encode(data.template_file.cloud_provider_config.rendered)}"
             proxy_env = "${base64encode(data.template_file.proxy_env.rendered)}"
-            proxy = "${var.proxy}"
+            proxy = "${replace(var.proxy, "http", "")}"
             static_ip_data = "${base64encode(data.template_file.static_ip_data.rendered)}"
           }
         }
@@ -386,7 +387,7 @@ data:
         output "ip_address" {
           value = "${vsphere_virtual_machine.master.default_ip_address}"
         }
-    - machineName: standard-node
+    - machineName: standard-node-proxy
       machineHcl: |
         variable "vsphere_user" {}
         variable "vsphere_password" {}
@@ -461,20 +462,21 @@ data:
         # Set HTTP_PROXY and related environment variables.
         # TODO: Make serviceDomain, podCidr and serviceCidr variables
         # in this template.
+        # Some things in ubuntu need the lower case, and some upper case.
         data "template_file" "proxy_env" {
           template = <<EOF
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         http_proxy="http://$${proxy}"
-        https_proxy="http://$${proxy}"
+        https_proxy="https://$${proxy}"
         ftp_proxy="http://$${proxy}"
         no_proxy="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address}"
         HTTP_PROXY="http://$${proxy}"
-        HTTPS_PROXY="http://$${proxy}"
+        HTTPS_PROXY="https://$${proxy}"
         FTP_PROXY="http://$${proxy}"
         NO_PROXY="localhost,127.0.0.1,.cluster.local,10.96.0.0/12,192.168.0.0/16,$${address}"
         EOF
           vars {
-            proxy = "${var.proxy}"
+            proxy = "${replace(var.proxy, "http", "")}"
             address = "${var.ipv4_address}"
           }
         }
@@ -564,8 +566,354 @@ data:
           vars {
             startup_script = "${base64encode(file(var.startup_script_path))}"
             proxy_env = "${base64encode(data.template_file.proxy_env.rendered)}"
-            proxy = "${var.proxy}"
+            proxy = "${replace(var.proxy, "http", "")}"
             static_ip_data = "${base64encode(data.template_file.static_ip_data.rendered)}"
+          }
+        }
+
+        resource "vsphere_virtual_machine" "node" {
+          name             = "${var.vm_name}"
+          resource_pool_id = "${data.vsphere_resource_pool.pool.id}"
+          datastore_id     = "${data.vsphere_datastore.datastore.id}"
+
+          num_cpus         = "${var.num_cpus}"
+          memory           = "${var.memory}"
+          guest_id         = "${data.vsphere_virtual_machine.template_from_ovf.guest_id}"
+          enable_disk_uuid = "true"
+
+          wait_for_guest_net_timeout = 15
+
+          scsi_type = "${data.vsphere_virtual_machine.template_from_ovf.scsi_type}"
+
+          network_interface {
+            network_id   = "${data.vsphere_network.network.id}"
+            adapter_type = "${data.vsphere_virtual_machine.template_from_ovf.network_interface_types[0]}"
+          }
+
+          disk {
+            label            = "${var.disk_label}"
+            size             = "${max(var.disk_size, data.vsphere_virtual_machine.template_from_ovf.disks.0.size)}"
+            eagerly_scrub    = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.eagerly_scrub}"
+            thin_provisioned = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.thin_provisioned}"
+          }
+
+          clone {
+            template_uuid = "${data.vsphere_virtual_machine.template_from_ovf.id}"
+          }
+
+          cdrom {
+            client_device = true
+          }
+
+          // These properties are defined in the Ubuntu cloud image OVA.
+          vapp {
+            properties {
+              hostname = "${var.vm_name}"
+              // This data has to be base64 encoded because OVF uses XML, and this
+              // has to be a valid XML attribute. Cloud-init on the other side will
+              // base64decode it.
+              "user-data" = "${base64encode(data.template_file.user_data.rendered)}"
+              "public-keys" = "${file("~/.ssh/vsphere_tmp.pub")}"
+            }
+          }
+        }
+
+        output "ip_address" {
+          value = "${vsphere_virtual_machine.node.default_ip_address}"
+        }
+    - machineName: standard-master
+      machineHcl: |
+        variable "vsphere_user" {}
+        variable "vsphere_password" {}
+        variable "vsphere_server" {}
+
+        variable "datacenter" {}
+        variable "datastore" {}
+        variable "resource_pool" {}
+        variable "num_cpus" {}
+        variable "memory" {}
+        variable "vm_template" {}
+        variable "network" { default = "VM Network"}
+        variable "disk_label" { default = "disk0" }
+        variable "disk_size" { default = 10}
+        variable "cluster" { default =  "" }
+        variable "startup_script_path" {}
+
+        variable "vm_name" {
+          type = "string"
+        }
+
+        provider "vsphere" {
+          version        = "~> 1.5.0"
+          user           = "${var.vsphere_user}"
+          password       = "${var.vsphere_password}"
+          vsphere_server = "${var.vsphere_server}"
+
+          # if you have a self-signed cert
+          allow_unverified_ssl = true
+        }
+
+        provider "template" {
+         version = "~> 1.0.0"
+        }
+
+        data "vsphere_datacenter" "dc" {
+          name = "${var.datacenter}"
+        }
+
+        data "vsphere_datastore" "datastore" {
+          name          = "${var.datastore}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_compute_cluster" "cluster" {
+          name          = "${var.cluster}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_resource_pool" "pool" {
+          name          = "${var.resource_pool}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_network" "network" {
+          name          = "${var.network}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_virtual_machine" "template_from_ovf" {
+          name          = "${var.vm_template}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "template_file" "cloud_provider_config" {
+          template = <<EOF
+        [Global]
+        datacenters = "$${datacenter}"
+        insecure-flag = "1" #set to 1 if the vCenter uses a self-signed cert
+
+        [VirtualCenter "$${vsphere_server}"]
+                user = "$${user}"
+                password = "$${password}"
+
+        [Workspace]
+                server = "$${vsphere_server}"
+                datacenter = "$${datacenter}"
+                folder = "$${resource_pool}"
+                default-datastore = "$${datastore}"
+                resourcepool-path = "$${resource_pool}"
+
+        [Disk]
+                scsicontrollertype = pvscsi
+
+        [Network]
+                public-network = "$${network}"
+        EOF
+          vars {
+            vsphere_server = "${var.vsphere_server}"
+            datacenter     = "${var.datacenter}"
+            user           = "${var.vsphere_user}"
+            password       = "${var.vsphere_password}"
+            datastore      = "${var.datastore}"
+            resource_pool  = "${var.resource_pool}"
+            network        = "${var.network}"
+          }
+        }
+
+        data "template_file" "user_data" {
+          template = <<EOF
+        #cloud-config
+        write_files:
+          # systemd service for kubernetes-installation primarily to get environment file support.
+          - path: /etc/systemd/system/kubernetes-installation.service
+            permissions: 0644
+            content: |
+              [Unit]
+              Description=Download and install kubernetes binaries and configurations.
+              After=network-online.target
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              EnvironmentFile=/etc/environment
+              ExecStart=/etc/kubernetes/installation/install.sh
+          # Startup script for this machine.
+          - path: /etc/kubernetes/installation/install.sh
+            permissions: '0755'
+            encoding: base64
+            content: |
+              $${startup_script}
+          # kubernetes vsphere cloud provider config.
+          - path: /etc/kubernetes/cloud-config/cloud-config.yaml
+            permissions: '0600'
+            encoding: base64
+            content: |
+              $${cloud_provider_config}
+          # Option to use an existing apt config file instead of prompting of it.
+          - path: /etc/apt/apt.conf.d/71debconf
+            permissions: '0644'
+            content: |
+              Dpkg::Options {
+                "--force-confdef";
+              };
+        runcmd:
+          - systemctl daemon-reload
+          - systemctl enable kubernetes-installation.service
+          - systemctl start kubernetes-installation.service
+        EOF
+          vars {
+            startup_script = "${base64encode(file(var.startup_script_path))}"
+            cloud_provider_config = "${base64encode(data.template_file.cloud_provider_config.rendered)}"
+          }
+        }
+
+        resource "vsphere_virtual_machine" "master" {
+          name             = "${var.vm_name}"
+          resource_pool_id = "${data.vsphere_resource_pool.pool.id}"
+          datastore_id     = "${data.vsphere_datastore.datastore.id}"
+
+          num_cpus         = "${var.num_cpus}"
+          memory           = "${var.memory}"
+          guest_id         = "${data.vsphere_virtual_machine.template_from_ovf.guest_id}"
+          enable_disk_uuid = "true"
+
+          wait_for_guest_net_timeout = 15
+
+          scsi_type = "${data.vsphere_virtual_machine.template_from_ovf.scsi_type}"
+
+          network_interface {
+            network_id   = "${data.vsphere_network.network.id}"
+            adapter_type = "${data.vsphere_virtual_machine.template_from_ovf.network_interface_types[0]}"
+          }
+
+          disk {
+            label            = "${var.disk_label}"
+            size             = "${max(var.disk_size, data.vsphere_virtual_machine.template_from_ovf.disks.0.size)}"
+            eagerly_scrub    = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.eagerly_scrub}"
+            thin_provisioned = "${data.vsphere_virtual_machine.template_from_ovf.disks.0.thin_provisioned}"
+          }
+
+          clone {
+            template_uuid = "${data.vsphere_virtual_machine.template_from_ovf.id}"
+          }
+
+          cdrom {
+            client_device = true
+          }
+
+          vapp {
+            properties {
+              hostname = "${var.vm_name}"
+              "user-data" = "${base64encode(data.template_file.user_data.rendered)}"
+              "public-keys" = "${file("~/.ssh/vsphere_tmp.pub")}"
+            }
+          }
+        }
+
+        output "ip_address" {
+          value = "${vsphere_virtual_machine.master.default_ip_address}"
+        }
+    - machineName: standard-node
+      machineHcl: |
+        variable "vsphere_user" {}
+        variable "vsphere_password" {}
+        variable "vsphere_server" {}
+
+        variable "datacenter" {}
+        variable "datastore" {}
+        variable "resource_pool" {}
+        variable "num_cpus" {}
+        variable "memory" {}
+        variable "vm_template" {}
+        variable "network" { default = "VM Network"}
+        variable "disk_label" { default = "disk0" }
+        variable "disk_size" { default = 10}
+        variable "cluster" { default =  "" }
+        variable "startup_script_path" {}
+
+        variable "vm_name" {
+          type = "string"
+        }
+
+        provider "vsphere" {
+          version        = "~> 1.5.0"
+          user           = "${var.vsphere_user}"
+          password       = "${var.vsphere_password}"
+          vsphere_server = "${var.vsphere_server}"
+
+          # if you have a self-signed cert
+          allow_unverified_ssl = true
+        }
+
+        provider "template" {
+         version = "~> 1.0.0"
+        }
+
+        data "vsphere_datacenter" "dc" {
+          name = "${var.datacenter}"
+        }
+
+        data "vsphere_datastore" "datastore" {
+          name          = "${var.datastore}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_compute_cluster" "cluster" {
+          name          = "${var.cluster}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_resource_pool" "pool" {
+          name          = "${var.resource_pool}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_network" "network" {
+          name          = "${var.network}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        data "vsphere_virtual_machine" "template_from_ovf" {
+          name          = "${var.vm_template}"
+          datacenter_id = "${data.vsphere_datacenter.dc.id}"
+        }
+
+        // Generate cloud-config for VM startup
+        data "template_file" "user_data" {
+          template = <<EOF
+        #cloud-config
+        write_files:
+          # systemd service for kubernetes-installation primarily to get environment file support.
+          - path: /etc/systemd/system/kubernetes-installation.service
+            permissions: 0644
+            content: |
+              [Unit]
+              Description=Download and install kubernetes binaries and configurations.
+              After=network-online.target
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              EnvironmentFile=/etc/environment
+              ExecStart=/etc/kubernetes/installation/install.sh
+          # Startup script for this machine.
+          - path: /etc/kubernetes/installation/install.sh
+            permissions: '0755'
+            encoding: base64
+            content: |
+              $${startup_script}
+          # Option to use an existing apt config file instead of prompting of it.
+          - path: /etc/apt/apt.conf.d/71debconf
+            permissions: '0644'
+            content: |
+              Dpkg::Options {
+                "--force-confdef";
+              };
+        runcmd:
+          - systemctl daemon-reload
+          - systemctl enable kubernetes-installation.service
+          - systemctl start kubernetes-installation.service
+        EOF
+          vars {
+            startup_script = "${base64encode(file(var.startup_script_path))}"
           }
         }
 
